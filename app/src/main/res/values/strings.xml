@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Interceptor</string>
+    <string name="nav_browser">Browser</string>
+    <string name="nav_traffic">Live Traffic</string>
+    <string name="nav_rules">Rules</string>
+    <string name="nav_history">History</string>
+    <string name="nav_settings">Settings</string>
+    <string name="strict_mode_active">STRICT INTERCEPTION ACTIVE</string>
+    <string name="action_allow">ALLOW</string>
+    <string name="action_block">BLOCK</string>
+    <string name="action_edit_send">EDIT &amp; SEND</string>
+    <string name="url_hint">Enter URL or search query…</string>
+    <string name="no_pending_requests">No pending network requests awaiting approval</string>
+    <string name="empty_traffic_title">Zero Silent Packets</string>
+    <string name="empty_traffic_subtitle">Navigate to any URL or use the built-in Sandbox Test Bench in the Browser tab to trigger real HTTP/HTTPS requests through the human-in-the-loop firewall.</string>
+</resources>
