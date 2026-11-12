@@ -115,4 +115,21 @@ class InterceptorRobolectricTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithTag("settings_screen").assertIsDisplayed()
     }
+
+    @Test
+    fun `test 14 - WebView file and photo upload chooser launches Android File Manager intent`() {
+        composeTestRule.waitForIdle()
+        val activity = composeTestRule.activity
+        var receivedUris: Array<android.net.Uri>? = null
+        val launched = activity.launchWebFileChooser(
+            filePathCallback = android.webkit.ValueCallback { uris -> receivedUris = uris },
+            fileChooserParams = null
+        )
+        org.junit.Assert.assertTrue(launched)
+        val shadowActivity = org.robolectric.Shadows.shadowOf(activity)
+        val startedIntent = shadowActivity.nextStartedActivity
+        assertNotNull("Expected File Manager intent to be started", startedIntent)
+        assertEquals(android.content.Intent.ACTION_OPEN_DOCUMENT, startedIntent.action)
+        assertEquals("*/*", startedIntent.type)
+    }
 }

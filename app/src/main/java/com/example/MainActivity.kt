@@ -1,15 +1,22 @@
 package com.example
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -116,19 +123,125 @@ enum class MainNavDestination(
 class MainActivity : ComponentActivity() {
     private val viewModel: InterceptorViewModel by viewModels()
 
+    // Activity-scoped file/photo chooser callback & launcher so it NEVER becomes stale across Compose recompositions!
+    private var activeFilePathCallback: ValueCallback<Array<Uri>>? = null
+
+    private val webFileChooserLauncher: ActivityResultLauncher<Intent> =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val callback = activeFilePathCallback
+            activeFilePathCallback = null
+            if (callback == null) return@registerForActivityResult
+
+            if (result.resultCode != Activity.RESULT_OK || result.data == null) {
+                callback.onReceiveValue(null)
+                return@registerForActivityResult
+            }
+
+            val data = result.data
+            val uris = mutableListOf<Uri>()
+            val clipData = data?.clipData
+            if (clipData != null) {
+                for (i in 0 until clipData.itemCount) {
+                    clipData.getItemAt(i)?.uri?.let { uri ->
+                        grantReadPermissionSafely(uri)
+                        uris.add(uri)
+                    }
+                }
+            } else {
+                data?.data?.let { uri ->
+                    grantReadPermissionSafely(uri)
+                    uris.add(uri)
+                }
+            }
+
+            if (uris.isNotEmpty()) {
+                callback.onReceiveValue(uris.toTypedArray())
+            } else {
+                val parsed = WebChromeClient.FileChooserParams.parseResult(result.resultCode, data)
+                callback.onReceiveValue(parsed)
+            }
+        }
+
+    private fun grantReadPermissionSafely(uri: Uri) {
+        try {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Launches the Android system File Manager / Photo Picker for any WebView `<input type="file">`.
+     * Registered at the ComponentActivity level so it is 100% lifecycle-safe even after switching tabs.
+     */
+    fun launchWebFileChooser(
+        filePathCallback: ValueCallback<Array<Uri>>,
+        fileChooserParams: WebChromeClient.FileChooserParams?
+    ): Boolean {
+        // Cancel any previously dangling callback so WebView never freezes
+        activeFilePathCallback?.onReceiveValue(null)
+        activeFilePathCallback = filePathCallback
+
+        val allowMultiple = fileChooserParams?.mode == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE
+
+        // Primary intent: ACTION_OPEN_DOCUMENT opens Android's built-in File Manager (DocumentsUI)
+        // with full access to Images, Videos, Downloads, and Internal Storage.
+        val openDocIntent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, allowMultiple)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+
+        // Secondary fallback intent: ACTION_GET_CONTENT
+        val getContentIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, allowMultiple)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        return try {
+            // Launch Android's built-in File Manager (DocumentsUI) directly without an extra chooser step
+            webFileChooserLauncher.launch(openDocIntent)
+            true
+        } catch (_: Exception) {
+            try {
+                webFileChooserLauncher.launch(Intent.createChooser(getContentIntent, "Select file or photo"))
+                true
+            } catch (e: Exception) {
+                activeFilePathCallback?.onReceiveValue(null)
+                activeFilePathCallback = null
+                Toast.makeText(this, "No file manager found on device: ${e.message}", Toast.LENGTH_SHORT).show()
+                false
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
-                InterceptorApp(viewModel = viewModel)
+                InterceptorApp(
+                    viewModel = viewModel,
+                    onShowWebFileChooser = ::launchWebFileChooser
+                )
             }
         }
     }
 }
 
 @Composable
-fun InterceptorApp(viewModel: InterceptorViewModel) {
+fun InterceptorApp(
+    viewModel: InterceptorViewModel,
+    onShowWebFileChooser: (ValueCallback<Array<Uri>>, WebChromeClient.FileChooserParams?) -> Boolean = { cb, _ ->
+        cb.onReceiveValue(null)
+        false
+    }
+) {
     var currentDest by remember { mutableStateOf(MainNavDestination.BROWSER) }
 
     val tabs by viewModel.tabs.collectAsStateWithLifecycle()
@@ -144,7 +257,6 @@ fun InterceptorApp(viewModel: InterceptorViewModel) {
     val inspectedRequest by viewModel.inspectedRequest.collectAsStateWithLifecycle()
     val editingRequest by viewModel.editingRequest.collectAsStateWithLifecycle()
 
-    // App-level retained WebView pool so switching between bottom tabs NEVER loses browser session!
     val webViewPool = remember { mutableStateMapOf<String, WebView>() }
 
     DisposableEffect(Unit) {
@@ -162,8 +274,6 @@ fun InterceptorApp(viewModel: InterceptorViewModel) {
         }
     }
 
-    // Use WindowInsets(0, 0, 0, 0) on Scaffold so top bars sit flush against the status bar like Chrome
-    // without double top inset gaps!
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -288,6 +398,7 @@ fun InterceptorApp(viewModel: InterceptorViewModel) {
                         totalCapturedCount = liveTraffic.size,
                         bridge = viewModel.webViewBridge,
                         webViewPool = webViewPool,
+                        onShowFileChooser = onShowWebFileChooser,
                         onNavigateUrl = viewModel::navigateActiveTab,
                         onUpdateTabMetadata = viewModel::updateActiveTabMetadata,
                         onSelectTab = viewModel::selectTab,

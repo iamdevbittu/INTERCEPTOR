@@ -1,8 +1,6 @@
 package com.example.browser
 
 import android.annotation.SuppressLint
-import android.app.Activity
-import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.CookieManager
@@ -14,8 +12,6 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
@@ -71,9 +67,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -123,6 +119,7 @@ fun BrowserScreen(
     totalCapturedCount: Int,
     bridge: WebViewInterceptorBridge,
     webViewPool: MutableMap<String, WebView>,
+    onShowFileChooser: (ValueCallback<Array<Uri>>, WebChromeClient.FileChooserParams?) -> Boolean,
     onNavigateUrl: (String) -> Unit,
     onUpdateTabMetadata: (url: String, title: String?) -> Unit,
     onSelectTab: (String) -> Unit,
@@ -146,40 +143,7 @@ fun BrowserScreen(
     var canGoForward by remember(activeTab.id) { mutableStateOf(existingTabWebView?.canGoForward() ?: false) }
     var showTabsDialog by remember { mutableStateOf(false) }
     var showBookmarksDialog by remember { mutableStateOf(false) }
-
-    // File / Photo Upload callback state for WebChromeClient.onShowFileChooser
-    var pendingFileChooserCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
-
-    val fileChooserLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        val callback = pendingFileChooserCallback
-        pendingFileChooserCallback = null
-        if (callback == null) return@rememberLauncherForActivityResult
-
-        if (result.resultCode != Activity.RESULT_OK || result.data == null) {
-            callback.onReceiveValue(null)
-            return@rememberLauncherForActivityResult
-        }
-
-        val data = result.data
-        val uris = mutableListOf<Uri>()
-        val clipData = data?.clipData
-        if (clipData != null) {
-            for (i in 0 until clipData.itemCount) {
-                clipData.getItemAt(i)?.uri?.let { uris.add(it) }
-            }
-        } else {
-            data?.data?.let { uris.add(it) }
-        }
-
-        if (uris.isNotEmpty()) {
-            callback.onReceiveValue(uris.toTypedArray())
-        } else {
-            val parsed = WebChromeClient.FileChooserParams.parseResult(result.resultCode, data)
-            callback.onReceiveValue(parsed)
-        }
-    }
+    val currentOnShowFileChooser by rememberUpdatedState(onShowFileChooser)
 
     // Clean up closed tab WebViews when tabs list changes
     DisposableEffect(tabs.map { it.id }) {
@@ -539,16 +503,8 @@ fun BrowserScreen(
                                 onUpdateTabMetadata(newUrl, newTitle)
                             },
                             onProgress = { p -> pageProgress = p },
-                            onLaunchFileChooser = { callback, intent ->
-                                // Cancel any previous unresolved callback so WebView never locks up
-                                pendingFileChooserCallback?.onReceiveValue(null)
-                                pendingFileChooserCallback = callback
-                                try {
-                                    fileChooserLauncher.launch(intent)
-                                } catch (_: Exception) {
-                                    pendingFileChooserCallback?.onReceiveValue(null)
-                                    pendingFileChooserCallback = null
-                                }
+                            onShowFileChooser = { callback, params ->
+                                currentOnShowFileChooser(callback, params)
                             }
                         )
                     }
@@ -614,7 +570,7 @@ private fun createConfiguredWebView(
     bridge: WebViewInterceptorBridge,
     onUrlAndTitleChanged: (url: String, title: String?, canGoBack: Boolean, canGoForward: Boolean) -> Unit,
     onProgress: (Int) -> Unit,
-    onLaunchFileChooser: (ValueCallback<Array<Uri>>, Intent) -> Unit
+    onShowFileChooser: (ValueCallback<Array<Uri>>, WebChromeClient.FileChooserParams?) -> Boolean
 ): WebView {
     return WebView(context).apply {
         CookieManager.getInstance().setAcceptCookie(true)
@@ -696,44 +652,18 @@ private fun createConfiguredWebView(
                 )
             }
 
-            // Enables <input type="file"> file & photo uploads on any website!
+            // Enables <input type="file"> and window.showOpenFilePicker() file & photo uploads on any website!
             override fun onShowFileChooser(
                 webView: WebView?,
                 filePathCallback: ValueCallback<Array<Uri>>?,
                 fileChooserParams: FileChooserParams?
             ): Boolean {
                 if (filePathCallback == null) return false
+                return onShowFileChooser(filePathCallback, fileChooserParams)
+            }
 
-                val acceptTypes = fileChooserParams?.acceptTypes
-                    ?.filter { it.isNotBlank() }
-                    ?: emptyList()
-
-                val primaryMime = when {
-                    acceptTypes.isEmpty() -> "*/*"
-                    acceptTypes.size == 1 && acceptTypes[0].contains("/") -> acceptTypes[0]
-                    acceptTypes.any { it.contains("image") } -> "image/*"
-                    acceptTypes.any { it.contains("video") } -> "video/*"
-                    else -> "*/*"
-                }
-
-                val getContentIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = primaryMime
-                    if (acceptTypes.size > 1) {
-                        putExtra(Intent.EXTRA_MIME_TYPES, acceptTypes.toTypedArray())
-                    }
-                    putExtra(
-                        Intent.EXTRA_ALLOW_MULTIPLE,
-                        fileChooserParams?.mode == FileChooserParams.MODE_OPEN_MULTIPLE
-                    )
-                }
-
-                val chooserIntent = Intent.createChooser(
-                    getContentIntent,
-                    fileChooserParams?.title ?: "Select file or photo to upload"
-                )
-                onLaunchFileChooser(filePathCallback, chooserIntent)
-                return true
+            override fun onPermissionRequest(request: android.webkit.PermissionRequest?) {
+                request?.grant(request.resources)
             }
         }
 

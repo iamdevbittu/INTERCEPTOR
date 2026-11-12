@@ -180,6 +180,69 @@ class RequestInterceptorEngine(
         }
     }
 
+    /**
+     * Evaluates native Chromium `shouldInterceptRequest` resources without blocking the Chromium IO thread
+     * on human-in-the-loop waits (which would otherwise freeze WebView Mojo IPC and prevent `<input type="file">`
+     * `onShowFileChooser` from opening the Android File Manager).
+     *
+     * Returns a [RequestState.BLOCKED] request if blocked by URL validation or Domain Firewall rules,
+     * or `null` to let Chromium's native networking stack stream the resource directly.
+     */
+    suspend fun evaluateNativeWebResource(rawRequest: InterceptedRequest): InterceptedRequest? {
+        val urlValidation = SecurityValidator.validateUrl(rawRequest.url)
+        if (!urlValidation.isValid) {
+            val blocked = rawRequest.copy(
+                state = RequestState.BLOCKED,
+                errorMessage = urlValidation.errors.joinToString("; ")
+            )
+            recordAndPersist(blocked)
+            return blocked
+        }
+
+        val host = InterceptedRequest.extractHost(rawRequest.url)
+        val classified = rawRequest.copy(
+            host = host,
+            path = InterceptedRequest.extractPath(rawRequest.url),
+            queryParams = InterceptedRequest.extractQueryParams(rawRequest.url),
+            cookies = InterceptedRequest.extractCookies(rawRequest.headers),
+            contentType = InterceptedRequest.findHeaderIgnoreCase(rawRequest.headers, "Content-Type")
+                ?: rawRequest.contentType
+        )
+
+        val policy = firewallEngine.evaluateDomain(host)
+        if (policy == DomainPolicyAction.ALWAYS_BLOCK) {
+            val blocked = classified.copy(
+                matchedPolicy = policy,
+                state = RequestState.BLOCKED,
+                errorMessage = "Blocked by Domain Firewall Rule ($host)"
+            )
+            recordAndPersist(blocked)
+            return blocked
+        }
+
+        // Record in Live Traffic & History asynchronously without blocking Chromium's IO thread
+        engineScope.launch {
+            val nativeCompleted = classified.copy(
+                matchedPolicy = policy,
+                state = RequestState.COMPLETED,
+                response = InterceptedResponse(
+                    statusCode = 200,
+                    statusMessage = "OK",
+                    headers = mapOf(
+                        "X-Interceptor-Pipeline" to "Chromium-Native-Stream",
+                        "X-Firewall-Policy" to policy.displayName
+                    ),
+                    contentType = classified.contentType ?: "text/html",
+                    body = "Handled natively by Chromium WebView stack (${classified.method} ${classified.url})",
+                    sizeBytes = 0L,
+                    durationMs = 1L
+                )
+            )
+            recordAndPersist(nativeCompleted)
+        }
+        return null
+    }
+
     fun approveRequest(requestId: String): Boolean {
         val deferred = pendingDeferredMap[requestId] ?: return false
         return deferred.complete(UserApprovalDecision.AllowOriginal)

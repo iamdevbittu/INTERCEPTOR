@@ -87,17 +87,19 @@ class WebViewInterceptorBridge(
     }
 
     /**
-     * Handles native WebView `shouldInterceptRequest` calls on WebView's background worker thread.
+     * Handles native WebView `shouldInterceptRequest` calls on WebView's background IO thread.
+     * Evaluates Domain Firewall block rules in <1ms without blocking the Chromium IO thread on
+     * human-in-the-loop waits (ensuring `WebChromeClient.onShowFileChooser` and page rendering never stall).
      */
     fun interceptNativeWebResource(webRequest: WebResourceRequest): WebResourceResponse? {
         val url = webRequest.url?.toString() ?: return null
         val scheme = webRequest.url?.scheme?.lowercase() ?: return null
         if (scheme != "http" && scheme != "https") return null
 
+        val methodUpper = (webRequest.method ?: "GET").uppercase()
         val headers = LinkedHashMap<String, String>()
         webRequest.requestHeaders?.forEach { (k, v) -> headers[k] = v }
 
-        // Attach WebView CookieManager cookies if not already present
         try {
             val webViewCookies = CookieManager.getInstance().getCookie(url)
             if (!webViewCookies.isNullOrBlank() && headers.keys.none { it.equals("Cookie", ignoreCase = true) }) {
@@ -108,21 +110,18 @@ class WebViewInterceptorBridge(
 
         val req = InterceptedRequest(
             url = url,
-            method = webRequest.method ?: "GET",
+            method = methodUpper,
             headers = headers,
             source = InterceptionSource.WEBVIEW_NATIVE,
             tabId = currentTabIdProvider()
         )
 
-        val processed = runBlocking {
-            engine.interceptAndProcess(req)
+        val blockedRequest = runBlocking {
+            engine.evaluateNativeWebResource(req)
         }
 
-        if (processed.state == RequestState.BLOCKED ||
-            processed.state == RequestState.TIMED_OUT ||
-            processed.state == RequestState.CANCELLED
-        ) {
-            val errorJson = """{"interceptor_firewall":"BLOCKED","state":"${processed.state.name}","reason":"${processed.errorMessage ?: "Blocked by user"}","url":"$url"}"""
+        if (blockedRequest != null && blockedRequest.state == RequestState.BLOCKED) {
+            val errorJson = """{"interceptor_firewall":"BLOCKED","state":"${blockedRequest.state.name}","reason":"${blockedRequest.errorMessage ?: "Blocked by user"}","url":"$url"}"""
             return WebResourceResponse(
                 "application/json",
                 "UTF-8",
@@ -130,70 +129,14 @@ class WebViewInterceptorBridge(
                 "Forbidden",
                 mapOf(
                     "Access-Control-Allow-Origin" to "*",
-                    "X-Interceptor-State" to processed.state.name
+                    "X-Interceptor-State" to blockedRequest.state.name
                 ),
                 ByteArrayInputStream(errorJson.toByteArray(Charsets.UTF_8))
             )
         }
 
-        val response = processed.response
-        if (processed.state == RequestState.COMPLETED && response != null) {
-            // Sync Set-Cookie headers back to WebView CookieManager
-            try {
-                val cookieManager = CookieManager.getInstance()
-                response.headers.forEach { (k, v) ->
-                    if (k.equals("Set-Cookie", ignoreCase = true)) {
-                        cookieManager.setCookie(url, v)
-                    }
-                }
-            } catch (_: Exception) {
-            }
-
-            val rawMime = (response.contentType ?: "text/html")
-                .substringBefore(";")
-                .trim()
-                .ifBlank { "text/plain" }
-
-            val charset = response.contentType
-                ?.substringAfter("charset=", "UTF-8")
-                ?.substringBefore(";")
-                ?.trim()
-                ?.removeSurrounding("\"")
-                ?.ifBlank { "UTF-8" } ?: "UTF-8"
-
-            val bytes = response.rawBytes ?: (response.body ?: "").toByteArray(Charsets.UTF_8)
-
-            // WebResourceResponse throws IllegalArgumentException if statusCode is in 300..399 or < 100 or if reasonPhrase is empty
-            val safeStatusCode = when (val code = response.statusCode) {
-                in 300..399 -> 200
-                204 -> 200
-                in 100..599 -> code
-                else -> 200
-            }
-            val safeReason = response.statusMessage
-                .replace(Regex("[^\\x20-\\x7E]"), "")
-                .trim()
-                .ifBlank { "OK" }
-
-            return try {
-                WebResourceResponse(
-                    rawMime,
-                    charset,
-                    safeStatusCode,
-                    safeReason,
-                    response.headers,
-                    ByteArrayInputStream(bytes)
-                )
-            } catch (_: Exception) {
-                WebResourceResponse(
-                    rawMime,
-                    charset,
-                    ByteArrayInputStream(bytes)
-                )
-            }
-        }
-
-        // If approved but upstream execution delegated or fell back, allow WebView native stack only if not blocked
+        // Return null so Chromium WebView streams the approved resource natively with full HTTP/2,
+        // cookies, multipart upload streams, and unblocked Mojo IPC for onShowFileChooser.
         return null
     }
 
@@ -201,14 +144,101 @@ class WebViewInterceptorBridge(
         const val JS_BRIDGE_NAME = "InterceptorNativeBridge"
 
         /**
-         * Injected into WebView pages to hook window.fetch and XMLHttpRequest so that
-         * POST/PUT/PATCH/DELETE payloads, JSON bodies, and custom headers are intercepted
-         * with full body fidelity before leaving the browser.
+         * Injected into WebView pages to:
+         * 1. Ensure detached `<input type="file">` elements created via JS (`document.createElement('input')`)
+         *    are attached to `document.body` before `.click()` and remove restrictive `capture` attributes
+         *    so Android WebView ALWAYS triggers `WebChromeClient.onShowFileChooser` to open the File Manager.
+         * 2. Polyfill `window.showOpenFilePicker` so modern sites using the File System Access API open the Android File Manager.
+         * 3. Hook `window.fetch` and `XMLHttpRequest` for JSON/text API inspection while delegating binary
+         *    `FormData`/`Blob`/`File` uploads to native fetch/XHR.
          */
         val JS_INTERCEPTOR_INJECTION = """
             (function() {
               if (window.__interceptorHookInstalled) return;
               window.__interceptorHookInstalled = true;
+
+              function prepareFileInputForAndroid(inputEl) {
+                try {
+                  if (!inputEl || !inputEl.type || inputEl.type.toLowerCase() !== 'file') return;
+                  if (inputEl.hasAttribute('capture')) {
+                    inputEl.removeAttribute('capture');
+                  }
+                  if (!inputEl.isConnected && document.body) {
+                    inputEl.style.position = 'fixed';
+                    inputEl.style.top = '-9999px';
+                    inputEl.style.left = '-9999px';
+                    inputEl.style.width = '1px';
+                    inputEl.style.height = '1px';
+                    inputEl.style.opacity = '0';
+                    inputEl.style.display = 'block';
+                    inputEl.style.visibility = 'visible';
+                    inputEl.style.pointerEvents = 'none';
+                    document.body.appendChild(inputEl);
+                  }
+                } catch (e) {}
+              }
+
+              // 1a. Fix programmatic .click() on detached <input type="file">
+              var origInputClick = HTMLInputElement.prototype.click;
+              HTMLInputElement.prototype.click = function() {
+                prepareFileInputForAndroid(this);
+                return origInputClick.apply(this, arguments);
+              };
+
+              var origElemClick = HTMLElement.prototype.click;
+              HTMLElement.prototype.click = function() {
+                if (this instanceof HTMLInputElement) {
+                  prepareFileInputForAndroid(this);
+                }
+                return origElemClick.apply(this, arguments);
+              };
+
+              // 1b. Also sanitize <input type="file"> on direct user tap before browser default action
+              document.addEventListener('click', function(ev) {
+                try {
+                  var target = ev.target;
+                  if (target && target.tagName === 'INPUT' && target.type && target.type.toLowerCase() === 'file') {
+                    prepareFileInputForAndroid(target);
+                  } else if (target && target.closest) {
+                    var label = target.closest('label');
+                    if (label) {
+                      var fileInput = label.querySelector('input[type="file"]') ||
+                        (label.htmlFor ? document.getElementById(label.htmlFor) : null);
+                      if (fileInput) prepareFileInputForAndroid(fileInput);
+                    }
+                  }
+                } catch (e) {}
+              }, true);
+
+              // 2. Polyfill window.showOpenFilePicker for Android WebView
+              if (typeof window.showOpenFilePicker !== 'function') {
+                window.showOpenFilePicker = function(options) {
+                  return new Promise(function(resolve, reject) {
+                    var input = document.createElement('input');
+                    input.type = 'file';
+                    if (options && options.multiple) {
+                      input.multiple = true;
+                    }
+                    prepareFileInputForAndroid(input);
+                    input.addEventListener('change', function() {
+                      var files = Array.from(input.files || []);
+                      if (files.length === 0) {
+                        reject(new DOMException('The user aborted a request.', 'AbortError'));
+                        return;
+                      }
+                      var handles = files.map(function(file) {
+                        return {
+                          kind: 'file',
+                          name: file.name,
+                          getFile: function() { return Promise.resolve(file); }
+                        };
+                      });
+                      resolve(handles);
+                    });
+                    origInputClick.call(input);
+                  });
+                };
+              }
 
               function resolveFullUrl(inputUrl) {
                 try {
@@ -218,9 +248,21 @@ class WebViewInterceptorBridge(
                 }
               }
 
-              // Hook window.fetch
+              function isBinaryUploadBody(body) {
+                if (!body) return false;
+                return (typeof FormData !== 'undefined' && body instanceof FormData) ||
+                  (typeof Blob !== 'undefined' && body instanceof Blob) ||
+                  (typeof File !== 'undefined' && body instanceof File) ||
+                  (typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer) ||
+                  (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams);
+              }
+
+              // 3. Hook window.fetch (delegating FormData/Blob/File uploads to native fetch)
               var origFetch = window.fetch;
               window.fetch = function(input, init) {
+                if (init && isBinaryUploadBody(init.body)) {
+                  return origFetch.call(window, input, init);
+                }
                 return new Promise(function(resolve, reject) {
                   try {
                     var rawUrl = (typeof input === 'string') ? input : (input && input.url ? input.url : String(input));
@@ -232,17 +274,6 @@ class WebViewInterceptorBridge(
                         init.headers.forEach(function(v, k) { headersObj[k] = v; });
                       } else if (typeof init.headers === 'object') {
                         Object.keys(init.headers).forEach(function(k) { headersObj[k] = init.headers[k]; });
-                      }
-                    }
-                    // If body is FormData or Blob or File (e.g. file/photo upload), delegate to native fetch so binary multipart upload works seamlessly!
-                    if (init && init.body && (
-                        (typeof FormData !== 'undefined' && init.body instanceof FormData) ||
-                        (typeof Blob !== 'undefined' && init.body instanceof Blob) ||
-                        (typeof ArrayBuffer !== 'undefined' && init.body instanceof ArrayBuffer)
-                    )) {
-                      if (origFetch) {
-                        origFetch.call(window, input, init).then(resolve).catch(reject);
-                        return;
                       }
                     }
 
@@ -277,7 +308,7 @@ class WebViewInterceptorBridge(
                       } catch (err) {
                         reject(err);
                       }
-                    }, 10);
+                    }, 1);
                   } catch (outerErr) {
                     reject(outerErr);
                   }
