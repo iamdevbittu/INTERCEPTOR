@@ -13,8 +13,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,19 +29,16 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
@@ -51,9 +50,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -68,6 +69,7 @@ import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ObsidianBg
 import com.example.ui.theme.ObsidianBorder
 import com.example.ui.theme.ObsidianSurface
+import com.example.ui.theme.ObsidianSurfaceElevated
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -107,7 +109,7 @@ fun RequestEditorDialog(
     }
 
     var activeSectionTab by remember { mutableIntStateOf(0) }
-    val sectionTitles = listOf("Endpoint & Method", "Headers (${headerPairs.size})", "Query & Cookies", "Body / JSON")
+    val sectionTitles = listOf("Endpoint", "Headers (${headerPairs.size})", "Query & Cookies", "Body / JSON")
 
     val currentDraft by remember {
         derivedStateOf {
@@ -141,15 +143,20 @@ fun RequestEditorDialog(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
     ) {
         Surface(
             modifier = Modifier
                 .fillMaxSize()
+                .systemBarsPadding()
+                .imePadding()
                 .padding(8.dp)
-                .border(1.dp, CyberCyan.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                .border(1.dp, CyberCyan.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
                 .testTag("request_editor_dialog"),
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(14.dp),
             color = ObsidianBg
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
@@ -164,25 +171,31 @@ fun RequestEditorDialog(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "INTERCEPTOR // REQUEST EDITOR",
+                            text = "REQUEST EDITOR",
                             style = MaterialTheme.typography.labelLarge,
                             color = CyberCyan
                         )
                         Text(
-                            text = "Modify & validate packet before network transmission",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary
+                            text = "Modify & validate packet before transmission",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
-                    IconButton(onClick = onDismiss) {
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(32.dp)
+                    ) {
                         Icon(Icons.Default.Close, contentDescription = "Cancel Edit", tint = TextSecondary)
                     }
                 }
 
-                TabRow(
+                ScrollableTabRow(
                     selectedTabIndex = activeSectionTab,
                     containerColor = ObsidianSurface,
-                    contentColor = CyberCyan
+                    contentColor = CyberCyan,
+                    edgePadding = 12.dp
                 ) {
                     sectionTitles.forEachIndexed { idx, title ->
                         Tab(
@@ -192,7 +205,8 @@ fun RequestEditorDialog(
                                 Text(
                                     text = title,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = if (activeSectionTab == idx) CyberCyan else TextSecondary
+                                    color = if (activeSectionTab == idx) CyberCyan else TextSecondary,
+                                    maxLines = 1
                                 )
                             }
                         )
@@ -204,7 +218,7 @@ fun RequestEditorDialog(
                         .weight(1f)
                         .fillMaxWidth()
                         .verticalScroll(rememberScrollState())
-                        .padding(14.dp),
+                        .padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     when (activeSectionTab) {
@@ -255,7 +269,7 @@ fun RequestEditorDialog(
                             KeyValueEditorList(
                                 title = "HTTP REQUEST HEADERS",
                                 pairs = headerPairs,
-                                keyHint = "Header Name (e.g. X-Custom-Auth)",
+                                keyHint = "Header Name",
                                 valueHint = "Header Value",
                                 addTag = "add_header_button"
                             )
@@ -291,18 +305,24 @@ fun RequestEditorDialog(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    "REQUEST PAYLOAD (JSON / FORM / TEXT)",
+                                    "PAYLOAD (JSON / FORM / TEXT)",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = CyberCyan
                                 )
-                                OutlinedButton(
-                                    onClick = {
-                                        editedBody = SecurityValidator.formatPrettyJson(editedBody)
-                                    }
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(ObsidianSurfaceElevated)
+                                        .border(1.dp, ObsidianBorder, RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            editedBody = SecurityValidator.formatPrettyJson(editedBody)
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Icon(Icons.Default.AutoFixHigh, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(14.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Pretty JSON", style = MaterialTheme.typography.labelSmall)
+                                    Text("Format JSON", style = MaterialTheme.typography.labelSmall, color = CyberCyan)
                                 }
                             }
                             OutlinedTextField(
@@ -310,7 +330,7 @@ fun RequestEditorDialog(
                                 onValueChange = { editedBody = it },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(220.dp)
+                                    .height(200.dp)
                                     .testTag("editor_body_input"),
                                 placeholder = { Text("{\"key\": \"value\"}", color = TextMuted) },
                                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFontFamily),
@@ -384,38 +404,61 @@ fun RequestEditorDialog(
                     }
                 }
 
-                // Bottom Action Bar
+                // Bottom Action Bar (Non-clipping custom buttons)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(ObsidianSurface)
                         .padding(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    OutlinedButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("CANCEL", style = MaterialTheme.typography.labelLarge, color = TextSecondary)
-                    }
-                    Button(
-                        onClick = { onTransmitEdited(currentDraft) },
-                        enabled = validation.isValid,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = EmeraldAllow,
-                            disabledContainerColor = ObsidianBorder
-                        ),
+                    Box(
                         modifier = Modifier
-                            .weight(2f)
-                            .testTag("confirm_edit_send_button")
+                            .weight(1f)
+                            .height(42.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(ObsidianSurfaceElevated)
+                            .border(1.dp, ObsidianBorder, RoundedCornerShape(10.dp))
+                            .clickable(onClick = onDismiss),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(Icons.Default.Send, contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            "APPROVE & TRANSMIT EDITED",
+                            text = "CANCEL",
                             style = MaterialTheme.typography.labelLarge,
-                            color = Color.Black,
-                            fontWeight = FontWeight.Bold
+                            color = TextSecondary,
+                            maxLines = 1
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .weight(1.8f)
+                            .height(42.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (validation.isValid) EmeraldAllow else ObsidianBorder)
+                            .clickable(enabled = validation.isValid) {
+                                onTransmitEdited(currentDraft)
+                            }
+                            .padding(horizontal = 12.dp)
+                            .testTag("confirm_edit_send_button"),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = null,
+                            tint = if (validation.isValid) Color.Black else TextMuted,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "SEND EDITED PACKET",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (validation.isValid) Color.Black else TextMuted,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -440,16 +483,22 @@ private fun KeyValueEditorList(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(title, style = MaterialTheme.typography.labelMedium, color = CyberCyan)
-            OutlinedButton(
-                onClick = {
-                    pairs.add(EditablePair("", ""))
-                    onPairsChanged()
-                },
-                modifier = Modifier.testTag(addTag)
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(ObsidianSurfaceElevated)
+                    .border(1.dp, ObsidianBorder, RoundedCornerShape(8.dp))
+                    .clickable {
+                        pairs.add(EditablePair("", ""))
+                        onPairsChanged()
+                    }
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                    .testTag(addTag),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(15.dp))
+                Icon(Icons.Default.Add, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(14.dp))
                 Spacer(modifier = Modifier.width(4.dp))
-                Text("Add Row", style = MaterialTheme.typography.labelSmall)
+                Text("Add Row", style = MaterialTheme.typography.labelSmall, color = CyberCyan)
             }
         }
 

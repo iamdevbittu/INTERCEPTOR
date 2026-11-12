@@ -28,7 +28,7 @@ import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
-class ExampleRobolectricTest {
+class InterceptorRobolectricTest {
 
     @get:Rule
     val composeTestRule = createAndroidComposeRule<MainActivity>()

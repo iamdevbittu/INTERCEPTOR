@@ -19,7 +19,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
@@ -459,13 +461,15 @@ private fun DomainRuleEditorDialog(
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .border(1.dp, CyberCyan.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                .border(1.dp, CyberCyan.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
                 .testTag("domain_rule_dialog"),
-            shape = RoundedCornerShape(12.dp),
+            shape = RoundedCornerShape(14.dp),
             color = ObsidianSurface
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier
+                    .verticalScroll( androidx.compose.foundation.rememberScrollState() )
+                    .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
@@ -477,7 +481,7 @@ private fun DomainRuleEditorDialog(
                 OutlinedTextField(
                     value = domain,
                     onValueChange = { domain = it },
-                    label = { Text("Domain or Wildcard (e.g. 127.0.0.1, *.ads.example.com)") },
+                    label = { Text("Domain or Wildcard (e.g. *.google.com)") },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -507,7 +511,7 @@ private fun DomainRuleEditorDialog(
                 OutlinedTextField(
                     value = priorityText,
                     onValueChange = { priorityText = it.filter { ch -> ch.isDigit() } },
-                    label = { Text("Rule Priority (Lower number = evaluated first, e.g. 10)") },
+                    label = { Text("Priority (Lower = evaluated first, e.g. 10)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -515,7 +519,7 @@ private fun DomainRuleEditorDialog(
                 OutlinedTextField(
                     value = notes,
                     onValueChange = { notes = it },
-                    label = { Text("Rule Notes / Audit Reason") },
+                    label = { Text("Rule Notes / Reason") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -525,7 +529,7 @@ private fun DomainRuleEditorDialog(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     OutlinedButton(onClick = onDismiss, modifier = Modifier.weight(1f)) {
-                        Text("Cancel", color = TextSecondary)
+                        Text("Cancel", color = TextSecondary, maxLines = 1)
                     }
                     Button(
                         onClick = {
@@ -537,10 +541,10 @@ private fun DomainRuleEditorDialog(
                         enabled = domain.isNotBlank(),
                         colors = ButtonDefaults.buttonColors(containerColor = EmeraldAllow),
                         modifier = Modifier
-                            .weight(1.5f)
+                            .weight(1.4f)
                             .testTag("save_domain_rule_button")
                     ) {
-                        Text("SAVE POLICY", color = Color.Black, fontWeight = FontWeight.Bold)
+                        Text("SAVE POLICY", color = Color.Black, fontWeight = FontWeight.Bold, maxLines = 1)
                     }
                 }
             }

@@ -12,7 +12,6 @@ import com.example.firewall.DomainFirewallEngine
 import com.example.interceptor.RequestInterceptorEngine
 import com.example.network.DomainPolicyAction
 import com.example.network.InterceptedRequest
-import com.example.network.InterceptionSource
 import com.example.network.LocalSandboxServer
 import com.example.network.OkHttpNetworkExecutor
 import com.example.network.RequestEditDraft
@@ -28,11 +27,19 @@ import java.util.UUID
 
 class InterceptorViewModel(application: Application) : AndroidViewModel(application) {
 
+    companion object {
+        const val DEFAULT_HOME_URL = "https://www.google.com"
+    }
+
     private val database = InterceptorDatabase.getInstance(application)
     val sandboxServer = LocalSandboxServer()
     val sandboxBaseUrl: String
 
-    val firewallEngine = DomainFirewallEngine(database.domainRuleDao())
+    // Seed default Google allow rules synchronously so www.google.com never blocks on startup
+    val firewallEngine = DomainFirewallEngine(
+        ruleDao = database.domainRuleDao(),
+        seedDefaultGoogleAllowRules = true
+    )
     private val networkExecutor = OkHttpNetworkExecutor()
 
     val interceptorEngine = RequestInterceptorEngine(
@@ -87,8 +94,8 @@ class InterceptorViewModel(application: Application) : AndroidViewModel(applicat
 
         val initialTab = BrowserTabState(
             id = "tab-1",
-            title = "Example Domain",
-            url = "https://example.com"
+            title = "Google",
+            url = DEFAULT_HOME_URL
         )
         _tabs.value = listOf(initialTab)
 
@@ -98,25 +105,38 @@ class InterceptorViewModel(application: Application) : AndroidViewModel(applicat
 
             database.bookmarkDao().upsertBookmark(
                 BookmarkEntity(
-                    url = "https://example.com",
-                    title = "Example Domain"
+                    url = DEFAULT_HOME_URL,
+                    title = "Google Search"
                 )
             )
             database.bookmarkDao().upsertBookmark(
                 BookmarkEntity(
                     url = "https://httpbin.org/get",
-                    title = "HTTPBin Inspector"
+                    title = "HTTPBin Request Inspector"
                 )
             )
         }
     }
 
-    fun navigateActiveTab(url: String) {
+    /**
+     * Updates the current tab's URL/title metadata when the user navigates or clicks a link.
+     */
+    fun updateActiveTabMetadata(url: String, title: String? = null) {
         val currentId = _activeTabId.value
-        val hostTitle = InterceptedRequest.extractHost(url).ifBlank { "Browser Tab" }
+        val resolvedTitle = if (!title.isNullOrBlank()) title else InterceptedRequest.extractHost(url).ifBlank { "Tab" }
         _tabs.value = _tabs.value.map { tab ->
-            if (tab.id == currentId) tab.copy(url = url, title = hostTitle) else tab
+            if (tab.id == currentId) {
+                tab.copy(
+                    url = url,
+                    title = resolvedTitle,
+                    isSecure = url.startsWith("https://", ignoreCase = true)
+                )
+            } else tab
         }
+    }
+
+    fun navigateActiveTab(url: String) {
+        updateActiveTabMetadata(url)
     }
 
     fun selectTab(tabId: String) {
@@ -129,8 +149,8 @@ class InterceptorViewModel(application: Application) : AndroidViewModel(applicat
         val newId = "tab-${UUID.randomUUID().toString().take(6)}"
         val newTab = BrowserTabState(
             id = newId,
-            title = "New Tab #${_tabs.value.size + 1}",
-            url = "https://example.com"
+            title = "Google",
+            url = DEFAULT_HOME_URL
         )
         _tabs.value = _tabs.value + newTab
         _activeTabId.value = newId

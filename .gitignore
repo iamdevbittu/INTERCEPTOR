@@ -15,4 +15,9 @@
 .cxx
 local.properties
 .env
+
+# Signing material is never committed - see README "Signing".
 debug.keystore
+my-upload-key.jks
+*.jks
+*.keystore

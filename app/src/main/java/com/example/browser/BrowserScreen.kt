@@ -1,13 +1,21 @@
 package com.example.browser
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
+import android.webkit.CookieManager
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
@@ -44,10 +52,10 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -60,17 +68,19 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -79,6 +89,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import com.example.InterceptorViewModel
 import com.example.database.BookmarkEntity
 import com.example.proxy.WebViewInterceptorBridge
 import com.example.ui.theme.AmberPending
@@ -111,7 +122,9 @@ fun BrowserScreen(
     pendingCount: Int,
     totalCapturedCount: Int,
     bridge: WebViewInterceptorBridge,
+    webViewPool: MutableMap<String, WebView>,
     onNavigateUrl: (String) -> Unit,
+    onUpdateTabMetadata: (url: String, title: String?) -> Unit,
     onSelectTab: (String) -> Unit,
     onNewTab: () -> Unit,
     onCloseTab: (String) -> Unit,
@@ -120,16 +133,65 @@ fun BrowserScreen(
     onOpenTrafficScreen: () -> Unit,
     onExportCurrentPageSnapshot: (String) -> Unit
 ) {
+    val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
     val activeTab = tabs.firstOrNull { it.id == activeTabId } ?: tabs.first()
-    var addressInput by remember(activeTab.url) { mutableStateOf(activeTab.url) }
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+
+    val existingTabWebView = webViewPool[activeTab.id]
+    var addressInput by remember(activeTab.id, activeTab.url) {
+        mutableStateOf(existingTabWebView?.url?.takeIf { it.isNotBlank() } ?: activeTab.url)
+    }
     var pageProgress by remember { mutableIntStateOf(100) }
-    var canGoBack by remember { mutableStateOf(false) }
-    var canGoForward by remember { mutableStateOf(false) }
+    var canGoBack by remember(activeTab.id) { mutableStateOf(existingTabWebView?.canGoBack() ?: false) }
+    var canGoForward by remember(activeTab.id) { mutableStateOf(existingTabWebView?.canGoForward() ?: false) }
     var showTabsDialog by remember { mutableStateOf(false) }
     var showBookmarksDialog by remember { mutableStateOf(false) }
 
-    val focusManager = LocalFocusManager.current
+    // File / Photo Upload callback state for WebChromeClient.onShowFileChooser
+    var pendingFileChooserCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
+
+    val fileChooserLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val callback = pendingFileChooserCallback
+        pendingFileChooserCallback = null
+        if (callback == null) return@rememberLauncherForActivityResult
+
+        if (result.resultCode != Activity.RESULT_OK || result.data == null) {
+            callback.onReceiveValue(null)
+            return@rememberLauncherForActivityResult
+        }
+
+        val data = result.data
+        val uris = mutableListOf<Uri>()
+        val clipData = data?.clipData
+        if (clipData != null) {
+            for (i in 0 until clipData.itemCount) {
+                clipData.getItemAt(i)?.uri?.let { uris.add(it) }
+            }
+        } else {
+            data?.data?.let { uris.add(it) }
+        }
+
+        if (uris.isNotEmpty()) {
+            callback.onReceiveValue(uris.toTypedArray())
+        } else {
+            val parsed = WebChromeClient.FileChooserParams.parseResult(result.resultCode, data)
+            callback.onReceiveValue(parsed)
+        }
+    }
+
+    // Clean up closed tab WebViews when tabs list changes
+    DisposableEffect(tabs.map { it.id }) {
+        val validIds = tabs.map { it.id }.toSet()
+        val removedIds = webViewPool.keys.filter { it !in validIds }
+        removedIds.forEach { removedId ->
+            webViewPool.remove(removedId)?.destroy()
+        }
+        onDispose { }
+    }
+
+    val activeWebView = webViewPool[activeTab.id]
     val isBookmarked = bookmarks.any { it.url == activeTab.url }
     val isHttps = activeTab.url.startsWith("https://", ignoreCase = true)
 
@@ -145,57 +207,73 @@ fun BrowserScreen(
         label = "pageProgress"
     )
 
+    fun loadUrlInActiveWebView(targetUrl: String) {
+        val normalized = normalizeUrlInput(targetUrl)
+        addressInput = normalized
+        onNavigateUrl(normalized)
+        webViewPool[activeTab.id]?.loadUrl(normalized)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(ObsidianBg)
             .testTag("browser_screen")
     ) {
-        // Unified Single-Block Premium Top Bar (Safe Status Bar Padding + Omnibox + Compact Action/Toggle Row)
+        // Chrome-Style Flush Top Bar (Sits directly under status bar with zero extra gap)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(Color(0xFF141722), ObsidianSurface)
-                    )
-                )
+                .background(ObsidianSurface)
                 .statusBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            // Row 1: Sleek Pill Omnibox + Strict Firewall Toggle Pill
+            // Row 1: Chrome-Style Omnibox Row (Home + Pill Address Bar + Tabs Box + Strict Shield)
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // Pill Omnibox containing Security Icon + URL Field + Reload/Go
+                // Home Button -> www.google.com
+                IconButton(
+                    onClick = { loadUrlInActiveWebView(InterceptorViewModel.DEFAULT_HOME_URL) },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Home,
+                        contentDescription = "Home (Google)",
+                        tint = TextPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                // Chrome-Style Pill Omnibox
                 Row(
                     modifier = Modifier
                         .weight(1f)
-                        .height(42.dp)
-                        .clip(RoundedCornerShape(21.dp))
-                        .background(ObsidianBg)
-                        .border(1.dp, ObsidianBorder, RoundedCornerShape(21.dp))
-                        .padding(horizontal = 10.dp),
+                        .height(38.dp)
+                        .clip(RoundedCornerShape(19.dp))
+                        .background(ObsidianSurfaceElevated)
+                        .border(1.dp, ObsidianBorder, RoundedCornerShape(19.dp))
+                        .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Security Indicator
                     Box(
                         modifier = Modifier.testTag("security_indicator"),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = if (isHttps) Icons.Default.Lock else Icons.Default.LockOpen,
-                            contentDescription = if (isHttps) "HTTPS Encrypted" else "Unencrypted HTTP",
+                            contentDescription = if (isHttps) "HTTPS Secure" else "HTTP",
                             tint = if (isHttps) EmeraldAllow else AmberPending,
-                            modifier = Modifier.size(15.dp)
+                            modifier = Modifier.size(14.dp)
                         )
                     }
 
-                    // Clean Single-Line URL Input
                     BasicTextField(
                         value = addressInput,
                         onValueChange = { addressInput = it },
@@ -209,10 +287,7 @@ fun BrowserScreen(
                         keyboardActions = KeyboardActions(
                             onGo = {
                                 focusManager.clearFocus()
-                                val normalized = normalizeUrlInput(addressInput)
-                                addressInput = normalized
-                                onNavigateUrl(normalized)
-                                webViewRef?.loadUrl(normalized)
+                                loadUrlInActiveWebView(addressInput)
                             }
                         ),
                         modifier = Modifier
@@ -222,7 +297,7 @@ fun BrowserScreen(
                             Box(contentAlignment = Alignment.CenterStart) {
                                 if (addressInput.isEmpty()) {
                                     Text(
-                                        text = "Search or enter domain…",
+                                        text = "Search Google or type URL",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = TextMuted,
                                         maxLines = 1
@@ -236,7 +311,7 @@ fun BrowserScreen(
                     if (addressInput.isNotEmpty() && addressInput != activeTab.url) {
                         Icon(
                             imageVector = Icons.Default.Close,
-                            contentDescription = "Clear URL",
+                            contentDescription = "Clear",
                             tint = TextMuted,
                             modifier = Modifier
                                 .size(16.dp)
@@ -244,7 +319,6 @@ fun BrowserScreen(
                         )
                     }
 
-                    // Inline Reload / Go Button
                     Icon(
                         imageVector = Icons.Default.Refresh,
                         contentDescription = "Reload",
@@ -256,33 +330,55 @@ fun BrowserScreen(
                                 focusManager.clearFocus()
                                 val normalized = normalizeUrlInput(addressInput)
                                 if (normalized != activeTab.url) {
-                                    addressInput = normalized
-                                    onNavigateUrl(normalized)
-                                    webViewRef?.loadUrl(normalized)
+                                    loadUrlInActiveWebView(normalized)
                                 } else {
-                                    webViewRef?.reload()
+                                    activeWebView?.reload()
                                 }
                             }
                             .testTag("browser_reload_button")
                     )
                 }
 
-                // Compact Animated Strict Mode Toggle Pill
-                Row(
+                // Chrome-Style Tab Counter Box
+                Box(
                     modifier = Modifier
-                        .height(42.dp)
-                        .clip(RoundedCornerShape(21.dp))
-                        .background(strictAccentColor.copy(alpha = 0.12f))
-                        .border(1.dp, strictAccentColor.copy(alpha = 0.45f), RoundedCornerShape(21.dp))
-                        .clickable(onClick = onToggleStrictMode)
-                        .padding(horizontal = 12.dp)
-                        .testTag("header_strict_mode_toggle"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        .size(34.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { showTabsDialog = true }
+                        .testTag("open_tabs_button"),
+                    contentAlignment = Alignment.Center
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(7.dp)
+                            .size(20.dp)
+                            .border(1.6.dp, TextPrimary, RoundedCornerShape(5.dp)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = tabs.size.toString(),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // Compact Strict Mode Toggle Pill
+                Row(
+                    modifier = Modifier
+                        .height(34.dp)
+                        .clip(RoundedCornerShape(17.dp))
+                        .background(strictAccentColor.copy(alpha = 0.14f))
+                        .border(1.dp, strictAccentColor.copy(alpha = 0.5f), RoundedCornerShape(17.dp))
+                        .clickable(onClick = onToggleStrictMode)
+                        .padding(horizontal = 10.dp)
+                        .testTag("header_strict_mode_toggle"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
                             .background(strictAccentColor, CircleShape)
                     )
                     Text(
@@ -295,13 +391,14 @@ fun BrowserScreen(
                 }
             }
 
-            // Row 2: Compact Single-Line Control & Telemetry Strip (Zero Stretching / Zero Wrapping)
+            // Row 2: Slim Secondary Action Strip (Back, Forward, Bookmark, Save, Saved List, Live Packet Badge)
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(30.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Navigation & Page Actions
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(2.dp)
@@ -311,14 +408,14 @@ fun BrowserScreen(
                         contentDescription = "Back",
                         enabled = canGoBack,
                         tag = "browser_back_button",
-                        onClick = { if (webViewRef?.canGoBack() == true) webViewRef?.goBack() }
+                        onClick = { if (activeWebView?.canGoBack() == true) activeWebView.goBack() }
                     )
                     CompactToolbarIcon(
                         icon = Icons.AutoMirrored.Filled.ArrowForward,
                         contentDescription = "Forward",
                         enabled = canGoForward,
                         tag = "browser_forward_button",
-                        onClick = { if (webViewRef?.canGoForward() == true) webViewRef?.goForward() }
+                        onClick = { if (activeWebView?.canGoForward() == true) activeWebView.goForward() }
                     )
                     CompactToolbarIcon(
                         icon = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
@@ -329,22 +426,20 @@ fun BrowserScreen(
                     )
                     CompactToolbarIcon(
                         icon = Icons.Default.Download,
-                        contentDescription = "Save Snapshot",
+                        contentDescription = "Copy URL Snapshot",
                         tag = "browser_download_button",
                         onClick = { onExportCurrentPageSnapshot(activeTab.url) }
                     )
                 }
 
-                // Right Toggles: Live Packet Counter Badge + Bookmarks Pill + Tabs Pill
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    // Live Traffic / Pending Pill
                     val hasPending = pendingCount > 0
                     Row(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(14.dp))
+                            .clip(RoundedCornerShape(12.dp))
                             .background(
                                 if (hasPending) AmberPending.copy(alpha = 0.16f)
                                 else ObsidianSurfaceElevated
@@ -352,19 +447,19 @@ fun BrowserScreen(
                             .border(
                                 1.dp,
                                 if (hasPending) AmberPending.copy(alpha = 0.6f) else ObsidianBorder,
-                                RoundedCornerShape(14.dp)
+                                RoundedCornerShape(12.dp)
                             )
                             .clickable(onClick = onOpenTrafficScreen)
-                            .padding(horizontal = 9.dp, vertical = 5.dp)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
                             .testTag("header_pending_badge"),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Shield,
                             contentDescription = null,
                             tint = if (hasPending) AmberPending else CyberCyan,
-                            modifier = Modifier.size(12.dp)
+                            modifier = Modifier.size(11.dp)
                         )
                         Text(
                             text = if (hasPending) "$pendingCount Hold" else "$totalCapturedCount Pkts",
@@ -375,53 +470,19 @@ fun BrowserScreen(
                         )
                     }
 
-                    // Saved Bookmarks Pill
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(14.dp))
+                            .clip(RoundedCornerShape(12.dp))
                             .background(ObsidianSurfaceElevated)
-                            .border(1.dp, ObsidianBorder, RoundedCornerShape(14.dp))
+                            .border(1.dp, ObsidianBorder, RoundedCornerShape(12.dp))
                             .clickable { showBookmarksDialog = true }
-                            .padding(horizontal = 9.dp, vertical = 5.dp)
+                            .padding(horizontal = 8.dp, vertical = 3.dp)
                             .testTag("open_bookmarks_button")
                     ) {
                         Text(
-                            text = "Saved (${bookmarks.size})",
+                            text = "Bookmarks (${bookmarks.size})",
                             style = MaterialTheme.typography.labelSmall,
                             color = TextSecondary,
-                            maxLines = 1
-                        )
-                    }
-
-                    // Tabs Switcher Pill
-                    Row(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(ObsidianSurfaceElevated)
-                            .border(1.dp, CyberCyan.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
-                            .clickable { showTabsDialog = true }
-                            .padding(horizontal = 9.dp, vertical = 5.dp)
-                            .testTag("open_tabs_button"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(16.dp)
-                                .border(1.2.dp, CyberCyan, RoundedCornerShape(4.dp)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = tabs.size.toString(),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = CyberCyan,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        Text(
-                            text = "Tabs",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextPrimary,
                             maxLines = 1
                         )
                     }
@@ -429,7 +490,7 @@ fun BrowserScreen(
             }
         }
 
-        // Smooth Animated Progress Bar
+        // Smooth Page Progress Indicator
         AnimatedVisibility(
             visible = pageProgress in 1..99,
             enter = fadeIn(),
@@ -446,76 +507,70 @@ fun BrowserScreen(
         }
         HorizontalDivider(color = ObsidianBorder.copy(alpha = 0.7f), thickness = 0.5.dp)
 
-        // Full-Bleed Chromium WebView
+        // Persistent WebView Container (Retains WebView instances across tab switches and bottom nav switches!)
         Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
         ) {
+            val currentTabId = activeTab.id
             AndroidView(
                 modifier = Modifier
                     .fillMaxSize()
                     .testTag("browser_webview"),
                 factory = { ctx ->
-                    WebView(ctx).apply {
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.databaseEnabled = true
-                        settings.loadsImagesAutomatically = true
-                        settings.useWideViewPort = true
-                        settings.loadWithOverviewMode = true
-                        settings.setSupportZoom(true)
-                        settings.builtInZoomControls = true
-                        settings.displayZoomControls = false
-                        settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                        settings.userAgentString = "${settings.userAgentString} InterceptorBrowser/1.0"
-
-                        addJavascriptInterface(bridge, WebViewInterceptorBridge.JS_BRIDGE_NAME)
-
-                        webViewClient = object : WebViewClient() {
-                            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                super.onPageStarted(view, url, favicon)
-                                if (!url.isNullOrBlank() && url != addressInput) {
-                                    addressInput = url
-                                }
-                                view?.evaluateJavascript(WebViewInterceptorBridge.JS_INTERCEPTOR_INJECTION, null)
-                                canGoBack = view?.canGoBack() ?: false
-                                canGoForward = view?.canGoForward() ?: false
-                            }
-
-                            override fun onPageFinished(view: WebView?, url: String?) {
-                                super.onPageFinished(view, url)
-                                view?.evaluateJavascript(WebViewInterceptorBridge.JS_INTERCEPTOR_INJECTION, null)
-                                canGoBack = view?.canGoBack() ?: false
-                                canGoForward = view?.canGoForward() ?: false
-                            }
-
-                            override fun shouldInterceptRequest(
-                                view: WebView?,
-                                request: WebResourceRequest?
-                            ): WebResourceResponse? {
-                                if (request == null) return null
-                                val urlStr = request.url?.toString() ?: return null
-                                if (urlStr.endsWith("/sandbox")) {
-                                    return super.shouldInterceptRequest(view, request)
-                                }
-                                return bridge.interceptNativeWebResource(request)
-                            }
-                        }
-
-                        webChromeClient = object : WebChromeClient() {
-                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                pageProgress = newProgress
-                            }
-                        }
-
-                        webViewRef = this
-                        loadUrl(activeTab.url)
+                    FrameLayout(ctx).apply {
+                        layoutParams = FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.MATCH_PARENT
+                        )
                     }
                 },
-                update = { view ->
-                    if (view.url != activeTab.url && activeTab.url.isNotBlank()) {
-                        view.loadUrl(activeTab.url)
+                update = { container ->
+                    val existingOrNewWebView = webViewPool.getOrPut(currentTabId) {
+                        createConfiguredWebView(
+                            context = context,
+                            initialUrl = activeTab.url,
+                            bridge = bridge,
+                            onUrlAndTitleChanged = { newUrl, newTitle, back, forward ->
+                                addressInput = newUrl
+                                canGoBack = back
+                                canGoForward = forward
+                                onUpdateTabMetadata(newUrl, newTitle)
+                            },
+                            onProgress = { p -> pageProgress = p },
+                            onLaunchFileChooser = { callback, intent ->
+                                // Cancel any previous unresolved callback so WebView never locks up
+                                pendingFileChooserCallback?.onReceiveValue(null)
+                                pendingFileChooserCallback = callback
+                                try {
+                                    fileChooserLauncher.launch(intent)
+                                } catch (_: Exception) {
+                                    pendingFileChooserCallback?.onReceiveValue(null)
+                                    pendingFileChooserCallback = null
+                                }
+                            }
+                        )
+                    }
+
+                    if (container.getChildAt(0) !== existingOrNewWebView) {
+                        container.removeAllViews()
+                        (existingOrNewWebView.parent as? FrameLayout)?.removeView(existingOrNewWebView)
+                        container.addView(
+                            existingOrNewWebView,
+                            FrameLayout.LayoutParams(
+                                FrameLayout.LayoutParams.MATCH_PARENT,
+                                FrameLayout.LayoutParams.MATCH_PARENT
+                            )
+                        )
+                        // Sync toolbar state with newly displayed tab's existing WebView
+                        existingOrNewWebView.url?.let { currentUrl ->
+                            if (currentUrl.isNotBlank()) {
+                                addressInput = currentUrl
+                            }
+                        }
+                        canGoBack = existingOrNewWebView.canGoBack()
+                        canGoForward = existingOrNewWebView.canGoForward()
                     }
                 }
             )
@@ -543,14 +598,146 @@ fun BrowserScreen(
         BookmarksDialog(
             bookmarks = bookmarks,
             onSelectBookmark = { url ->
-                addressInput = url
-                onNavigateUrl(url)
-                webViewRef?.loadUrl(url)
+                loadUrlInActiveWebView(url)
                 showBookmarksDialog = false
             },
             onDeleteBookmark = { url -> onToggleBookmark(url, "") },
             onDismiss = { showBookmarksDialog = false }
         )
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+private fun createConfiguredWebView(
+    context: android.content.Context,
+    initialUrl: String,
+    bridge: WebViewInterceptorBridge,
+    onUrlAndTitleChanged: (url: String, title: String?, canGoBack: Boolean, canGoForward: Boolean) -> Unit,
+    onProgress: (Int) -> Unit,
+    onLaunchFileChooser: (ValueCallback<Array<Uri>>, Intent) -> Unit
+): WebView {
+    return WebView(context).apply {
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+        settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            allowFileAccess = true
+            allowContentAccess = true
+            loadsImagesAutomatically = true
+            useWideViewPort = true
+            loadWithOverviewMode = true
+            setSupportZoom(true)
+            builtInZoomControls = true
+            displayZoomControls = false
+            setSupportMultipleWindows(false)
+            javaScriptCanOpenWindowsAutomatically = true
+            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            cacheMode = WebSettings.LOAD_DEFAULT
+        }
+
+        addJavascriptInterface(bridge, WebViewInterceptorBridge.JS_BRIDGE_NAME)
+
+        webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                view?.evaluateJavascript(WebViewInterceptorBridge.JS_INTERCEPTOR_INJECTION, null)
+                if (!url.isNullOrBlank()) {
+                    onUrlAndTitleChanged(
+                        url,
+                        view?.title,
+                        view?.canGoBack() ?: false,
+                        view?.canGoForward() ?: false
+                    )
+                }
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                view?.evaluateJavascript(WebViewInterceptorBridge.JS_INTERCEPTOR_INJECTION, null)
+                if (!url.isNullOrBlank()) {
+                    onUrlAndTitleChanged(
+                        url,
+                        view?.title,
+                        view?.canGoBack() ?: false,
+                        view?.canGoForward() ?: false
+                    )
+                }
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): WebResourceResponse? {
+                if (request == null) return null
+                val urlStr = request.url?.toString() ?: return null
+                if (urlStr.endsWith("/sandbox")) {
+                    return super.shouldInterceptRequest(view, request)
+                }
+                return bridge.interceptNativeWebResource(request)
+            }
+        }
+
+        webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                onProgress(newProgress)
+            }
+
+            override fun onReceivedTitle(view: WebView?, title: String?) {
+                super.onReceivedTitle(view, title)
+                val currentUrl = view?.url ?: return
+                onUrlAndTitleChanged(
+                    currentUrl,
+                    title,
+                    view.canGoBack(),
+                    view.canGoForward()
+                )
+            }
+
+            // Enables <input type="file"> file & photo uploads on any website!
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                if (filePathCallback == null) return false
+
+                val acceptTypes = fileChooserParams?.acceptTypes
+                    ?.filter { it.isNotBlank() }
+                    ?: emptyList()
+
+                val primaryMime = when {
+                    acceptTypes.isEmpty() -> "*/*"
+                    acceptTypes.size == 1 && acceptTypes[0].contains("/") -> acceptTypes[0]
+                    acceptTypes.any { it.contains("image") } -> "image/*"
+                    acceptTypes.any { it.contains("video") } -> "video/*"
+                    else -> "*/*"
+                }
+
+                val getContentIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = primaryMime
+                    if (acceptTypes.size > 1) {
+                        putExtra(Intent.EXTRA_MIME_TYPES, acceptTypes.toTypedArray())
+                    }
+                    putExtra(
+                        Intent.EXTRA_ALLOW_MULTIPLE,
+                        fileChooserParams?.mode == FileChooserParams.MODE_OPEN_MULTIPLE
+                    )
+                }
+
+                val chooserIntent = Intent.createChooser(
+                    getContentIntent,
+                    fileChooserParams?.title ?: "Select file or photo to upload"
+                )
+                onLaunchFileChooser(filePathCallback, chooserIntent)
+                return true
+            }
+        }
+
+        loadUrl(initialUrl)
     }
 }
 
@@ -560,21 +747,21 @@ private fun CompactToolbarIcon(
     contentDescription: String,
     tag: String,
     enabled: Boolean = true,
-    tint: Color = if (enabled) TextPrimary else TextMuted.copy(alpha = 0.45f),
+    tint: Color = if (enabled) TextPrimary else TextMuted.copy(alpha = 0.4f),
     onClick: () -> Unit
 ) {
     IconButton(
         onClick = onClick,
         enabled = enabled,
         modifier = Modifier
-            .size(34.dp)
+            .size(30.dp)
             .testTag(tag)
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
             tint = tint,
-            modifier = Modifier.size(18.dp)
+            modifier = Modifier.size(17.dp)
         )
     }
 }
@@ -614,9 +801,7 @@ private fun TabsSwitcherDialog(
                         onClick = onNewTab,
                         colors = ButtonDefaults.buttonColors(containerColor = CyberCyan),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        modifier = Modifier
-                            .height(34.dp)
-                            .testTag("new_tab_button")
+                        modifier = Modifier.testTag("new_tab_button")
                     ) {
                         Icon(Icons.Default.Add, contentDescription = null, tint = Color.Black, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.width(4.dp))
@@ -691,7 +876,7 @@ private fun BookmarksDialog(
                 modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("SAVED BOOKMARKS", style = MaterialTheme.typography.labelLarge, color = TextPrimary)
+                Text("BOOKMARKS", style = MaterialTheme.typography.labelLarge, color = TextPrimary)
                 if (bookmarks.isEmpty()) {
                     Text("No saved bookmarks yet.", style = MaterialTheme.typography.bodySmall, color = TextMuted)
                 }
@@ -729,13 +914,13 @@ private fun BookmarksDialog(
 
 private fun normalizeUrlInput(raw: String): String {
     val trimmed = raw.trim()
-    if (trimmed.isEmpty()) return "https://example.com"
+    if (trimmed.isEmpty()) return InterceptorViewModel.DEFAULT_HOME_URL
     if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
         return trimmed
     }
     return if (trimmed.contains(".") && !trimmed.contains(" ")) {
         "https://$trimmed"
     } else {
-        "https://duckduckgo.com/?q=${java.net.URLEncoder.encode(trimmed, "UTF-8")}"
+        "https://www.google.com/search?q=${java.net.URLEncoder.encode(trimmed, "UTF-8")}"
     }
 }

@@ -27,20 +27,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -54,6 +52,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -63,6 +63,7 @@ import com.example.network.InterceptedRequest
 import com.example.network.RequestState
 import com.example.responseinspector.MethodBadge
 import com.example.responseinspector.StateBadge
+import com.example.responseinspector.copyToClipboard
 import com.example.ui.theme.AmberPending
 import com.example.ui.theme.CrimsonBlock
 import com.example.ui.theme.CyberCyan
@@ -71,6 +72,7 @@ import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.ObsidianBg
 import com.example.ui.theme.ObsidianBorder
 import com.example.ui.theme.ObsidianSurface
+import com.example.ui.theme.ObsidianSurfaceElevated
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -256,25 +258,27 @@ fun LiveTrafficScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = onAllowAllPending,
-                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldAllow),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                        shape = RoundedCornerShape(8.dp),
+                    Box(
                         modifier = Modifier
-                            .height(30.dp)
-                            .testTag("allow_all_pending_button")
+                            .height(32.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(EmeraldAllow)
+                            .clickable(onClick = onAllowAllPending)
+                            .padding(horizontal = 12.dp)
+                            .testTag("allow_all_pending_button"),
+                        contentAlignment = Alignment.Center
                     ) {
                         Text("Allow All", style = MaterialTheme.typography.labelSmall, color = Color.Black, fontWeight = FontWeight.Bold)
                     }
-                    Button(
-                        onClick = onBlockAllPending,
-                        colors = ButtonDefaults.buttonColors(containerColor = CrimsonBlock),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                        shape = RoundedCornerShape(8.dp),
+                    Box(
                         modifier = Modifier
-                            .height(30.dp)
-                            .testTag("block_all_pending_button")
+                            .height(32.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(CrimsonBlock)
+                            .clickable(onClick = onBlockAllPending)
+                            .padding(horizontal = 12.dp)
+                            .testTag("block_all_pending_button"),
+                        contentAlignment = Alignment.Center
                     ) {
                         Text("Block All", style = MaterialTheme.typography.labelSmall, color = Color.White, fontWeight = FontWeight.Bold)
                     }
@@ -307,7 +311,7 @@ fun LiveTrafficScreen(
                         color = TextPrimary
                     )
                     Text(
-                        text = "Browse any website in the Browser tab to inspect, modify, or block live HTTP and HTTPS requests in real time.",
+                        text = "Browse any website in the Browser tab to inspect, copy, modify, or block live HTTP and HTTPS requests in real time.",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextSecondary
                     )
@@ -368,6 +372,7 @@ fun TrafficRequestCard(
     onInspect: () -> Unit,
     onQuickDomainRule: (String, DomainPolicyAction) -> Unit
 ) {
+    val context = LocalContext.current
     val isPending = request.state == RequestState.PENDING
     val borderColor = when {
         isPending -> AmberPending.copy(alpha = 0.8f)
@@ -404,11 +409,43 @@ fun TrafficRequestCard(
                 MethodBadge(request.method)
                 StateBadge(request.state, request.wasModified)
             }
-            Text(
-                text = timeStr,
-                style = MaterialTheme.typography.labelSmall,
-                color = TextMuted
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Tap-to-copy URL & response directly from card
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(ObsidianSurfaceElevated)
+                        .clickable {
+                            val textToCopy = if (!request.response?.body.isNullOrBlank()) {
+                                "${request.method} ${request.url}\n\nResponse (${request.response?.statusCode}):\n${request.response?.body}"
+                            } else if (!request.body.isNullOrBlank()) {
+                                "${request.method} ${request.url}\n\nRequest Body:\n${request.body}"
+                            } else {
+                                request.url
+                            }
+                            copyToClipboard(context, "Packet Data", textToCopy)
+                        }
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ContentCopy,
+                        contentDescription = "Copy packet data",
+                        tint = CyberCyan,
+                        modifier = Modifier.size(11.dp)
+                    )
+                    Text("Copy", style = MaterialTheme.typography.labelSmall, color = CyberCyan)
+                }
+                Text(
+                    text = timeStr,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted
+                )
+            }
         }
 
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -471,48 +508,33 @@ fun TrafficRequestCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Button(
-                    onClick = onAllow,
-                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldAllow),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(34.dp)
-                        .testTag("card_allow_${request.id}")
-                ) {
-                    Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("ALLOW", style = MaterialTheme.typography.labelSmall, color = Color.Black, fontWeight = FontWeight.Bold)
-                }
-                Button(
-                    onClick = onEdit,
-                    colors = ButtonDefaults.buttonColors(containerColor = AmberPending),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    modifier = Modifier
-                        .weight(1.15f)
-                        .height(34.dp)
-                        .testTag("card_edit_${request.id}")
-                ) {
-                    Icon(Icons.Default.Edit, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("EDIT", style = MaterialTheme.typography.labelSmall, color = Color.Black, fontWeight = FontWeight.Bold)
-                }
-                Button(
-                    onClick = onBlock,
-                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonBlock),
-                    shape = RoundedCornerShape(8.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(34.dp)
-                        .testTag("card_block_${request.id}")
-                ) {
-                    Icon(Icons.Default.Block, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("BLOCK", style = MaterialTheme.typography.labelSmall, color = Color.White, fontWeight = FontWeight.Bold)
-                }
+                TrafficActionButton(
+                    label = "ALLOW",
+                    icon = Icons.Default.CheckCircle,
+                    bgColor = EmeraldAllow,
+                    textColor = Color.Black,
+                    tag = "card_allow_${request.id}",
+                    modifier = Modifier.weight(1f),
+                    onClick = onAllow
+                )
+                TrafficActionButton(
+                    label = "EDIT",
+                    icon = Icons.Default.Edit,
+                    bgColor = AmberPending,
+                    textColor = Color.Black,
+                    tag = "card_edit_${request.id}",
+                    modifier = Modifier.weight(1f),
+                    onClick = onEdit
+                )
+                TrafficActionButton(
+                    label = "BLOCK",
+                    icon = Icons.Default.Block,
+                    bgColor = CrimsonBlock,
+                    textColor = Color.White,
+                    tag = "card_block_${request.id}",
+                    modifier = Modifier.weight(1f),
+                    onClick = onBlock
+                )
             }
         } else {
             Row(
@@ -521,26 +543,35 @@ fun TrafficRequestCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    OutlinedButton(
-                        onClick = { onQuickDomainRule(request.host, DomainPolicyAction.ALWAYS_ALLOW) },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                        shape = RoundedCornerShape(6.dp),
-                        modifier = Modifier.height(26.dp)
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(ObsidianSurfaceElevated)
+                            .border(1.dp, EmeraldAllow.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+                            .clickable { onQuickDomainRule(request.host, DomainPolicyAction.ALWAYS_ALLOW) }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         Text("Trust Host", style = MaterialTheme.typography.labelSmall, color = EmeraldAllow)
                     }
-                    OutlinedButton(
-                        onClick = { onQuickDomainRule(request.host, DomainPolicyAction.ALWAYS_BLOCK) },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                        shape = RoundedCornerShape(6.dp),
-                        modifier = Modifier.height(26.dp)
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(ObsidianSurfaceElevated)
+                            .border(1.dp, CrimsonBlock.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+                            .clickable { onQuickDomainRule(request.host, DomainPolicyAction.ALWAYS_BLOCK) }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         Text("Block Host", style = MaterialTheme.typography.labelSmall, color = CrimsonBlock)
                     }
                 }
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.clickable { onInspect() }
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { onInspect() }
+                        .padding(horizontal = 6.dp, vertical = 4.dp)
                 ) {
                     Icon(Icons.Default.Visibility, contentDescription = null, tint = CyberCyan, modifier = Modifier.size(14.dp))
                     Spacer(modifier = Modifier.width(4.dp))
@@ -548,5 +579,39 @@ fun TrafficRequestCard(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun TrafficActionButton(
+    label: String,
+    icon: ImageVector,
+    bgColor: Color,
+    textColor: Color,
+    tag: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = modifier
+            .height(36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(bgColor)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp)
+            .testTag(tag),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(imageVector = icon, contentDescription = null, tint = textColor, modifier = Modifier.size(14.dp))
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = textColor,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }

@@ -1,5 +1,6 @@
 package com.example.proxy
 
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -13,14 +14,6 @@ import java.io.ByteArrayInputStream
 
 /**
  * Bridges Android Chromium WebView networking to the human-in-the-loop [RequestInterceptorEngine].
- *
- * Uses two complementary rootless interception mechanisms:
- * 1. JavaScript `fetch()` and `XMLHttpRequest` hook injected at document start (`JS_HOOK_SCRIPT`)
- *    combined with `@JavascriptInterface` (`InterceptorJsBridge`). This captures full HTTP payloads
- *    (POST/PUT/PATCH/DELETE JSON bodies, form data, custom headers, and cookies) BEFORE transmission
- *    and suspends the JS Promise/XHR until the user approves, edits, or blocks the request.
- * 2. `WebViewClient.shouldInterceptRequest` (`interceptWebViewResource`) for standard navigation,
- *    document, and subresource requests not routed through the JS bridge.
  */
 class WebViewInterceptorBridge(
     private val engine: RequestInterceptorEngine,
@@ -73,7 +66,7 @@ class WebViewInterceptorBridge(
             if (processed.state == RequestState.COMPLETED && response != null) {
                 respJson.put("allowed", true)
                 respJson.put("status", response.statusCode)
-                respJson.put("statusText", response.statusMessage)
+                respJson.put("statusText", response.statusMessage.ifBlank { "OK" })
                 respJson.put("body", response.body ?: "")
                 val respHeadersJson = JSONObject()
                 response.headers.forEach { (k, v) -> respHeadersJson.put(k, v) }
@@ -101,9 +94,17 @@ class WebViewInterceptorBridge(
         val scheme = webRequest.url?.scheme?.lowercase() ?: return null
         if (scheme != "http" && scheme != "https") return null
 
-        // Skip requests that already carry our internal bypass marker from JS bridge if any
         val headers = LinkedHashMap<String, String>()
         webRequest.requestHeaders?.forEach { (k, v) -> headers[k] = v }
+
+        // Attach WebView CookieManager cookies if not already present
+        try {
+            val webViewCookies = CookieManager.getInstance().getCookie(url)
+            if (!webViewCookies.isNullOrBlank() && headers.keys.none { it.equals("Cookie", ignoreCase = true) }) {
+                headers["Cookie"] = webViewCookies
+            }
+        } catch (_: Exception) {
+        }
 
         val req = InterceptedRequest(
             url = url,
@@ -117,33 +118,16 @@ class WebViewInterceptorBridge(
             engine.interceptAndProcess(req)
         }
 
-        val response = processed.response
-        return if (processed.state == RequestState.COMPLETED && response != null) {
-            val rawMime = (response.contentType ?: "text/html").substringBefore(";").trim()
-            val charset = response.contentType
-                ?.substringAfter("charset=", "UTF-8")
-                ?.substringBefore(";")
-                ?.trim() ?: "UTF-8"
-
-            val bytes = response.rawBytes ?: (response.body ?: "").toByteArray(Charsets.UTF_8)
-            val statusReason = response.statusMessage.ifBlank { "OK" }
-
-            WebResourceResponse(
-                rawMime.ifBlank { "text/plain" },
-                charset,
-                response.statusCode.coerceIn(100, 599),
-                statusReason,
-                response.headers,
-                ByteArrayInputStream(bytes)
-            )
-        } else {
-            // Return controlled network error response when blocked or timed out
+        if (processed.state == RequestState.BLOCKED ||
+            processed.state == RequestState.TIMED_OUT ||
+            processed.state == RequestState.CANCELLED
+        ) {
             val errorJson = """{"interceptor_firewall":"BLOCKED","state":"${processed.state.name}","reason":"${processed.errorMessage ?: "Blocked by user"}","url":"$url"}"""
-            WebResourceResponse(
+            return WebResourceResponse(
                 "application/json",
                 "UTF-8",
                 403,
-                "Blocked by Interceptor Firewall",
+                "Forbidden",
                 mapOf(
                     "Access-Control-Allow-Origin" to "*",
                     "X-Interceptor-State" to processed.state.name
@@ -151,6 +135,66 @@ class WebViewInterceptorBridge(
                 ByteArrayInputStream(errorJson.toByteArray(Charsets.UTF_8))
             )
         }
+
+        val response = processed.response
+        if (processed.state == RequestState.COMPLETED && response != null) {
+            // Sync Set-Cookie headers back to WebView CookieManager
+            try {
+                val cookieManager = CookieManager.getInstance()
+                response.headers.forEach { (k, v) ->
+                    if (k.equals("Set-Cookie", ignoreCase = true)) {
+                        cookieManager.setCookie(url, v)
+                    }
+                }
+            } catch (_: Exception) {
+            }
+
+            val rawMime = (response.contentType ?: "text/html")
+                .substringBefore(";")
+                .trim()
+                .ifBlank { "text/plain" }
+
+            val charset = response.contentType
+                ?.substringAfter("charset=", "UTF-8")
+                ?.substringBefore(";")
+                ?.trim()
+                ?.removeSurrounding("\"")
+                ?.ifBlank { "UTF-8" } ?: "UTF-8"
+
+            val bytes = response.rawBytes ?: (response.body ?: "").toByteArray(Charsets.UTF_8)
+
+            // WebResourceResponse throws IllegalArgumentException if statusCode is in 300..399 or < 100 or if reasonPhrase is empty
+            val safeStatusCode = when (val code = response.statusCode) {
+                in 300..399 -> 200
+                204 -> 200
+                in 100..599 -> code
+                else -> 200
+            }
+            val safeReason = response.statusMessage
+                .replace(Regex("[^\\x20-\\x7E]"), "")
+                .trim()
+                .ifBlank { "OK" }
+
+            return try {
+                WebResourceResponse(
+                    rawMime,
+                    charset,
+                    safeStatusCode,
+                    safeReason,
+                    response.headers,
+                    ByteArrayInputStream(bytes)
+                )
+            } catch (_: Exception) {
+                WebResourceResponse(
+                    rawMime,
+                    charset,
+                    ByteArrayInputStream(bytes)
+                )
+            }
+        }
+
+        // If approved but upstream execution delegated or fell back, allow WebView native stack only if not blocked
+        return null
     }
 
     companion object {
@@ -175,6 +219,7 @@ class WebViewInterceptorBridge(
               }
 
               // Hook window.fetch
+              var origFetch = window.fetch;
               window.fetch = function(input, init) {
                 return new Promise(function(resolve, reject) {
                   try {
@@ -189,6 +234,18 @@ class WebViewInterceptorBridge(
                         Object.keys(init.headers).forEach(function(k) { headersObj[k] = init.headers[k]; });
                       }
                     }
+                    // If body is FormData or Blob or File (e.g. file/photo upload), delegate to native fetch so binary multipart upload works seamlessly!
+                    if (init && init.body && (
+                        (typeof FormData !== 'undefined' && init.body instanceof FormData) ||
+                        (typeof Blob !== 'undefined' && init.body instanceof Blob) ||
+                        (typeof ArrayBuffer !== 'undefined' && init.body instanceof ArrayBuffer)
+                    )) {
+                      if (origFetch) {
+                        origFetch.call(window, input, init).then(resolve).catch(reject);
+                        return;
+                      }
+                    }
+
                     var bodyStr = null;
                     if (init && init.body !== undefined && init.body !== null) {
                       bodyStr = (typeof init.body === 'string') ? init.body : JSON.stringify(init.body);
@@ -226,83 +283,6 @@ class WebViewInterceptorBridge(
                   }
                 });
               };
-
-              // Hook XMLHttpRequest
-              var OrigXHR = window.XMLHttpRequest;
-              function InterceptedXHR() {
-                var self = this;
-                this._method = 'GET';
-                this._url = '';
-                this._headers = {};
-                this.readyState = 0;
-                this.status = 0;
-                this.statusText = '';
-                this.responseText = '';
-                this.response = '';
-                this.onreadystatechange = null;
-                this.onload = null;
-                this.onerror = null;
-              }
-              InterceptedXHR.prototype.open = function(method, url) {
-                this._method = method ? String(method).toUpperCase() : 'GET';
-                this._url = resolveFullUrl(url);
-                this.readyState = 1;
-              };
-              InterceptedXHR.prototype.setRequestHeader = function(k, v) {
-                this._headers[k] = v;
-              };
-              InterceptedXHR.prototype.getAllResponseHeaders = function() {
-                if (!this._respHeaders) return '';
-                var out = '';
-                var rh = this._respHeaders;
-                Object.keys(rh).forEach(function(k) { out += k + ': ' + rh[k] + '\r\n'; });
-                return out;
-              };
-              InterceptedXHR.prototype.getResponseHeader = function(name) {
-                if (!this._respHeaders) return null;
-                var lower = String(name).toLowerCase();
-                var found = null;
-                var rh = this._respHeaders;
-                Object.keys(rh).forEach(function(k) {
-                  if (k.toLowerCase() === lower) found = rh[k];
-                });
-                return found;
-              };
-              InterceptedXHR.prototype.send = function(body) {
-                var self = this;
-                var bodyStr = (body !== undefined && body !== null) ? String(body) : null;
-                var payload = JSON.stringify({
-                  url: self._url,
-                  method: self._method,
-                  headers: self._headers,
-                  cookies: document.cookie || '',
-                  body: bodyStr,
-                  source: 'XHR'
-                });
-                setTimeout(function() {
-                  try {
-                    var rawResult = window.$JS_BRIDGE_NAME.interceptSync(payload);
-                    var parsed = JSON.parse(rawResult);
-                    if (!parsed.allowed) {
-                      self.readyState = 4;
-                      self.status = 0;
-                      if (typeof self.onerror === 'function') self.onerror(new Error(parsed.error));
-                      return;
-                    }
-                    self.readyState = 4;
-                    self.status = parsed.status || 200;
-                    self.statusText = parsed.statusText || 'OK';
-                    self.responseText = parsed.body || '';
-                    self.response = parsed.body || '';
-                    self._respHeaders = parsed.headers || {};
-                    if (typeof self.onreadystatechange === 'function') self.onreadystatechange();
-                    if (typeof self.onload === 'function') self.onload();
-                  } catch (e) {
-                    if (typeof self.onerror === 'function') self.onerror(e);
-                  }
-                }, 10);
-              };
-              window.XMLHttpRequest = InterceptedXHR;
             })();
         """.trimIndent()
     }

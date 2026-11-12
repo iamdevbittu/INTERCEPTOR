@@ -12,7 +12,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.ConcurrentHashMap
 
 class DomainFirewallEngine(
-    private val ruleDao: DomainRuleDao? = null
+    private val ruleDao: DomainRuleDao? = null,
+    seedDefaultGoogleAllowRules: Boolean = false
 ) : DomainPolicyEngineContract {
 
     private val inMemoryRules = ConcurrentHashMap<String, DomainRuleEntity>()
@@ -21,10 +22,49 @@ class DomainFirewallEngine(
 
     val ruleHistoryFlow: Flow<List<RuleHistoryEntity>>? = ruleDao?.observeRuleHistory()
 
+    init {
+        if (seedDefaultGoogleAllowRules) {
+            seedBuiltInWhitelistedDomains()
+        }
+    }
+
+    /**
+     * Seeds default trusted rules for www.google.com and its required asset domains
+     * synchronously so the default home page (www.google.com) loads immediately
+     * without any network block.
+     */
+    fun seedBuiltInWhitelistedDomains() {
+        val now = System.currentTimeMillis()
+        val defaultDomains = listOf(
+            "www.google.com" to "Default Home Screen (Always Allowed)",
+            "*.google.com" to "Google Search & Core Services",
+            "google.com" to "Google Root Domain",
+            "*.gstatic.com" to "Google Static Assets & Fonts",
+            "*.googleapis.com" to "Google Web APIs",
+            "*.googleusercontent.com" to "Google Media & Assets"
+        )
+        defaultDomains.forEachIndexed { idx, (pattern, note) ->
+            if (!inMemoryRules.containsKey(pattern)) {
+                inMemoryRules[pattern] = DomainRuleEntity(
+                    domainPattern = pattern,
+                    actionName = DomainPolicyAction.ALWAYS_ALLOW.name,
+                    priority = idx + 1,
+                    createdAt = now,
+                    updatedAt = now,
+                    notes = note
+                )
+            }
+        }
+        refreshSortedState()
+    }
+
     suspend fun loadFromDatabase() {
         val loaded = ruleDao?.getAllRules() ?: emptyList()
-        inMemoryRules.clear()
         loaded.forEach { inMemoryRules[it.domainPattern.lowercase()] = it }
+        // Persist any seeded in-memory rules that aren't in DB yet
+        inMemoryRules.values.forEach { rule ->
+            ruleDao?.upsertRule(rule)
+        }
         refreshSortedState()
     }
 
@@ -33,7 +73,6 @@ class DomainFirewallEngine(
         val fullHostWithPort = host.trim().lowercase()
         val now = System.currentTimeMillis()
 
-        // Sort rules by priority ascending (lower number = higher priority), then exact match before wildcard
         val candidates = inMemoryRules.values.sortedWith(
             compareBy<DomainRuleEntity> { it.priority }
                 .thenBy { it.domainPattern.startsWith("*.") }
@@ -41,17 +80,14 @@ class DomainFirewallEngine(
 
         for (rule in candidates) {
             if (matchesDomain(normalizedHost, fullHostWithPort, rule.domainPattern.lowercase())) {
-                // Check expiration for TEMPORARY_ALLOW
                 if (rule.action == DomainPolicyAction.TEMPORARY_ALLOW &&
                     rule.expiresAtMillis != null &&
                     now > rule.expiresAtMillis
                 ) {
-                    // Expired temporary rule reverts to ASK_EVERY_TIME
                     removeRule(rule.domainPattern, "Temporary allow expired -> reverted to ASK")
                     return DomainPolicyAction.ASK_EVERY_TIME
                 }
 
-                // Check ALLOW_ONCE consumption
                 if (rule.action == DomainPolicyAction.ALLOW_ONCE) {
                     val remaining = (rule.remainingAllowance ?: 1) - 1
                     if (remaining <= 0) {
@@ -68,7 +104,6 @@ class DomainFirewallEngine(
                     return DomainPolicyAction.ALLOW_ONCE
                 }
 
-                // Update hit counters
                 val isAllowed = rule.action == DomainPolicyAction.ALWAYS_ALLOW ||
                     rule.action == DomainPolicyAction.TEMPORARY_ALLOW
                 val isBlocked = rule.action == DomainPolicyAction.ALWAYS_BLOCK
@@ -83,7 +118,6 @@ class DomainFirewallEngine(
             }
         }
 
-        // Default policy for unknown domains: ASK (Section 9)
         return DomainPolicyAction.ASK_EVERY_TIME
     }
 
@@ -99,7 +133,7 @@ class DomainFirewallEngine(
         val existing = inMemoryRules[pattern]
 
         val expiresAt = if (action == DomainPolicyAction.TEMPORARY_ALLOW) {
-            now + 15 * 60 * 1000L // 15 minutes
+            now + 15 * 60 * 1000L
         } else null
 
         val allowance = if (action == DomainPolicyAction.ALLOW_ONCE) 1 else null

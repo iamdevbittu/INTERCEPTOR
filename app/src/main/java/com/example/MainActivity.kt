@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Bundle
+import android.webkit.WebView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -27,15 +28,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -53,8 +53,6 @@ import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -64,7 +62,9 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -97,7 +97,6 @@ import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.ObsidianBg
 import com.example.ui.theme.ObsidianBorder
 import com.example.ui.theme.ObsidianSurface
-import com.example.ui.theme.ObsidianSurfaceElevated
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 
@@ -145,6 +144,16 @@ fun InterceptorApp(viewModel: InterceptorViewModel) {
     val inspectedRequest by viewModel.inspectedRequest.collectAsStateWithLifecycle()
     val editingRequest by viewModel.editingRequest.collectAsStateWithLifecycle()
 
+    // App-level retained WebView pool so switching between bottom tabs NEVER loses browser session!
+    val webViewPool = remember { mutableStateMapOf<String, WebView>() }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            webViewPool.values.forEach { it.destroy() }
+            webViewPool.clear()
+        }
+    }
+
     val context = LocalContext.current
 
     if (currentDest != MainNavDestination.BROWSER) {
@@ -153,13 +162,13 @@ fun InterceptorApp(viewModel: InterceptorViewModel) {
         }
     }
 
+    // Use WindowInsets(0, 0, 0, 0) on Scaffold so top bars sit flush against the status bar like Chrome
+    // without double top inset gaps!
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        contentWindowInsets = WindowInsets.safeDrawing,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         containerColor = ObsidianBg,
         topBar = {
-            // BrowserScreen has its own integrated single-block top bar;
-            // only show the compact secondary header on non-Browser destinations.
             if (currentDest != MainNavDestination.BROWSER) {
                 SecondaryScreenTopBar(
                     title = currentDest.label,
@@ -172,7 +181,12 @@ fun InterceptorApp(viewModel: InterceptorViewModel) {
             }
         },
         bottomBar = {
-            Column {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(ObsidianSurface)
+                    .navigationBarsPadding()
+            ) {
                 val headPending = pendingRequests.firstOrNull()
                 AnimatedVisibility(
                     visible = headPending != null,
@@ -201,7 +215,8 @@ fun InterceptorApp(viewModel: InterceptorViewModel) {
                 NavigationBar(
                     containerColor = ObsidianSurface,
                     contentColor = CyberCyan,
-                    tonalElevation = 0.dp
+                    tonalElevation = 0.dp,
+                    windowInsets = WindowInsets(0, 0, 0, 0)
                 ) {
                     MainNavDestination.entries.forEach { dest ->
                         val selected = currentDest == dest
@@ -259,7 +274,7 @@ fun InterceptorApp(viewModel: InterceptorViewModel) {
             AnimatedContent(
                 targetState = currentDest,
                 transitionSpec = {
-                    fadeIn(animationSpec = tween(180)) togetherWith fadeOut(animationSpec = tween(140))
+                    fadeIn(animationSpec = tween(150)) togetherWith fadeOut(animationSpec = tween(120))
                 },
                 label = "mainNavTransition"
             ) { targetDest ->
@@ -272,7 +287,9 @@ fun InterceptorApp(viewModel: InterceptorViewModel) {
                         pendingCount = pendingRequests.size,
                         totalCapturedCount = liveTraffic.size,
                         bridge = viewModel.webViewBridge,
+                        webViewPool = webViewPool,
                         onNavigateUrl = viewModel::navigateActiveTab,
+                        onUpdateTabMetadata = viewModel::updateActiveTabMetadata,
                         onSelectTab = viewModel::selectTab,
                         onNewTab = viewModel::createNewTab,
                         onCloseTab = viewModel::closeTab,
@@ -281,8 +298,8 @@ fun InterceptorApp(viewModel: InterceptorViewModel) {
                         onOpenTrafficScreen = { currentDest = MainNavDestination.TRAFFIC },
                         onExportCurrentPageSnapshot = { url ->
                             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            cm.setPrimaryClip(ClipData.newPlainText("Interceptor Target URL", url))
-                            Toast.makeText(context, "Copied URL snapshot for $url", Toast.LENGTH_SHORT).show()
+                            cm.setPrimaryClip(ClipData.newPlainText("Interceptor URL", url))
+                            Toast.makeText(context, "Copied URL: $url", Toast.LENGTH_SHORT).show()
                         }
                     )
 
@@ -509,7 +526,7 @@ private fun GlobalPendingApprovalOverlay(
                 )
                 if (totalPendingCount > 1) {
                     Text(
-                        text = "+${totalPendingCount - 1} queue",
+                        text = "+${totalPendingCount - 1}",
                         style = MaterialTheme.typography.labelSmall,
                         color = AmberPending,
                         maxLines = 1
@@ -542,48 +559,72 @@ private fun GlobalPendingApprovalOverlay(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Button(
-                onClick = onAllow,
-                colors = ButtonDefaults.buttonColors(containerColor = EmeraldAllow),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .height(34.dp)
-                    .testTag("global_allow_button")
-            ) {
-                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("ALLOW", style = MaterialTheme.typography.labelSmall, color = Color.Black, fontWeight = FontWeight.Bold)
-            }
-            Button(
-                onClick = onEditAndSend,
-                colors = ButtonDefaults.buttonColors(containerColor = AmberPending),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .weight(1.15f)
-                    .height(34.dp)
-                    .testTag("global_edit_send_button")
-            ) {
-                Icon(Icons.Default.Edit, contentDescription = null, tint = Color.Black, modifier = Modifier.size(14.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("EDIT", style = MaterialTheme.typography.labelSmall, color = Color.Black, fontWeight = FontWeight.Bold)
-            }
-            Button(
-                onClick = onBlock,
-                colors = ButtonDefaults.buttonColors(containerColor = CrimsonBlock),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .height(34.dp)
-                    .testTag("global_block_button")
-            ) {
-                Icon(Icons.Default.Block, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("BLOCK", style = MaterialTheme.typography.labelSmall, color = Color.White, fontWeight = FontWeight.Bold)
-            }
+            OverlayActionButton(
+                label = "ALLOW",
+                icon = Icons.Default.CheckCircle,
+                containerColor = EmeraldAllow,
+                contentColor = Color.Black,
+                tag = "global_allow_button",
+                modifier = Modifier.weight(1f),
+                onClick = onAllow
+            )
+            OverlayActionButton(
+                label = "EDIT",
+                icon = Icons.Default.Edit,
+                containerColor = AmberPending,
+                contentColor = Color.Black,
+                tag = "global_edit_send_button",
+                modifier = Modifier.weight(1f),
+                onClick = onEditAndSend
+            )
+            OverlayActionButton(
+                label = "BLOCK",
+                icon = Icons.Default.Block,
+                containerColor = CrimsonBlock,
+                contentColor = Color.White,
+                tag = "global_block_button",
+                modifier = Modifier.weight(1f),
+                onClick = onBlock
+            )
         }
+    }
+}
+
+@Composable
+fun OverlayActionButton(
+    label: String,
+    icon: ImageVector,
+    containerColor: Color,
+    contentColor: Color,
+    tag: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = modifier
+            .height(38.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(containerColor)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp)
+            .testTag(tag),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = contentColor,
+            modifier = Modifier.size(15.dp)
+        )
+        Spacer(modifier = Modifier.width(5.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = contentColor,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }

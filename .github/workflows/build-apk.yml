@@ -22,7 +22,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GRADLE_VERSION: "9.3.1"
   ANDROID_PLATFORM: "platforms;android-36.1"
   ANDROID_BUILD_TOOLS: "build-tools;36.1.0"
 
@@ -73,12 +72,11 @@ jobs:
           echo "--- installed platforms ---"
           ls "$ANDROID_HOME/platforms"
 
-      # The repo ships no gradlew wrapper (only gradle/wrapper/gradle-wrapper.properties),
-      # so Gradle is provisioned here at the version the project pins.
+      # The Gradle wrapper is committed (gradle-wrapper.properties pins 9.3.1), so ./gradlew
+      # provisions the correct distribution itself; this action adds dependency/wrapper caching.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: ${{ env.GRADLE_VERSION }}
           cache-read-only: false
 
       # app/build.gradle.kts hard-codes:
@@ -119,14 +117,14 @@ jobs:
           KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
           STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || 'interceptor-ci' }}
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || 'interceptor-ci' }}
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
       - name: Build release APK
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
           STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD || 'interceptor-ci' }}
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD || 'interceptor-ci' }}
-        run: gradle :app:assembleRelease --no-daemon --stacktrace
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
       - name: Collect APKs and checksums
         if: always()

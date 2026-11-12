@@ -47,12 +47,12 @@ INTERCEPTOR is structured into clean, decoupled modules inside `app/src/main/jav
 
 ### Compile Debug & Release APKs
 ```bash
-gradle assembleDebug assembleRelease
+./gradlew assembleDebug assembleRelease
 ```
 
 ### Run Automated Unit & Robolectric QA Suite
 ```bash
-gradle :app:testDebugUnitTest
+./gradlew :app:testDebugUnitTest
 ```
 
 ### Install APK on Device

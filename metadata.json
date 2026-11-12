@@ -1,6 +1,0 @@
-{
-  "name": "Interceptor",
-  "description": "Rootless privacy-focused Android browser with human-in-the-loop network request inspection, editing, and domain firewall control.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

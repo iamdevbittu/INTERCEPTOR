@@ -25,7 +25,7 @@ import org.junit.Test
  * Automated Quality Assurance Suite (Section 14) using a real localhost TCP HTTP test server
  * ([LocalSandboxServer]) to verify actual network transmission behavior.
  */
-class ExampleUnitTest {
+class InterceptorEngineTest {
 
     private lateinit var testServer: LocalSandboxServer
     private lateinit var firewallEngine: DomainFirewallEngine
@@ -318,6 +318,15 @@ class ExampleUnitTest {
         assertEquals(2, testServer.receivedRequests.size)
     }
 
+    @Test
+    fun `test 13 - Default home screen www_google_com and Google asset domains are pre-whitelisted as ALWAYS_ALLOW`() = runBlocking {
+        val defaultFirewall = DomainFirewallEngine(ruleDao = null, seedDefaultGoogleAllowRules = true)
+        assertEquals("https://www.google.com", InterceptorViewModel.DEFAULT_HOME_URL)
+        assertEquals(DomainPolicyAction.ALWAYS_ALLOW, defaultFirewall.evaluateDomain("www.google.com"))
+        assertEquals(DomainPolicyAction.ALWAYS_ALLOW, defaultFirewall.evaluateDomain("apis.google.com"))
+        assertEquals(DomainPolicyAction.ALWAYS_ALLOW, defaultFirewall.evaluateDomain("www.gstatic.com"))
+    }
+
     private suspend fun withTimeoutWait(predicate: () -> Boolean) {
         var elapsed = 0L
         while (!predicate() && elapsed < 2500L) {
@@ -326,3 +335,4 @@ class ExampleUnitTest {
         }
     }
 }
+
